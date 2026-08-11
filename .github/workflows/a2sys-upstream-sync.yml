@@ -1,0 +1,101 @@
+name: upstream sync
+
+# Opens a daily PR that merges upstream/main into develop.
+# The branch is created AT upstream/main and GitHub computes the merge, so
+# conflicts surface natively in the PR UI and the merge lands as one commit.
+
+on:
+  schedule:
+    - cron: "0 18 * * 0-4" # 03:00 KST, Mon-Fri
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM: https://github.com/vllm-project/vllm.git
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      # N7 — never stack integration PRs. Yesterday's failure must be resolved first.
+      - name: Fail if a sync PR is still open
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          open=$(gh pr list --state open --json headRefName \
+            --jq '[.[] | select(.headRefName | startswith("integration/upstream-"))] | length')
+          if [ "$open" -ne 0 ]; then
+            echo "::error::A previous sync PR is still open. Resolve it before syncing again (N7)."
+            exit 1
+          fi
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "$UPSTREAM"
+          git fetch --no-tags --prune upstream main
+
+      # G6 — how far behind are we
+      - name: Report distance
+        run: |
+          behind=$(git rev-list --count develop..upstream/main)
+          echo "behind=$behind" >> "$GITHUB_ENV"
+          echo "### upstream/main is $behind commits ahead of develop" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Skip when already up to date
+        if: env.behind == '0'
+        run: echo "Nothing to sync." && exit 0
+
+      - name: Push integration branch
+        if: env.behind != '0'
+        run: |
+          branch="integration/upstream-$(date -u +%Y%m%d)"
+          echo "branch=$branch" >> "$GITHUB_ENV"
+          git push --force origin "refs/remotes/upstream/main:refs/heads/$branch"
+
+      - name: Open sync PR
+        if: env.behind != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(git rev-parse --short upstream/main)
+          # Files we touch, so the reviewer knows where conflicts can appear.
+          ours=$(git diff --name-only upstream/main...develop -- vllm/ | head -40)
+          gh pr create \
+            --base develop --head "$branch" \
+            --title "chore(sync): upstream/main @ $sha (+$behind)" \
+            --body "$(cat <<EOF
+          자동 생성된 상류 동기화 PR입니다. **squash 하지 마십시오** — merge commit으로 머지합니다.
+
+          - upstream/main: \`$sha\`
+          - develop 대비 앞선 커밋: **$behind**
+
+          <details><summary>우리가 수정한 vllm/ 파일 (충돌 가능 지점)</summary>
+
+          \`\`\`
+          $ours
+          \`\`\`
+          </details>
+
+          충돌이 표시되면 로컬에서 해결하십시오. 해결 결과는 머지 커밋에 영구 기록되어 다음 동기화에서 재발하지 않습니다.
+
+          \`\`\`bash
+          git fetch origin && git checkout $branch
+          git merge origin/develop   # 여기서 해결
+          git push origin $branch
+          \`\`\`
+          EOF
+          )"
+          gh pr merge --auto --merge "$branch" || \
+            echo "::warning::auto-merge unavailable — enable it in repo settings, or merge manually"

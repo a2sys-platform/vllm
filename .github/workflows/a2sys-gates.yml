@@ -1,0 +1,28 @@
+name: gates
+
+# Tier C — deterministic checks that block a merge once they are required status checks.
+# Currently implements the copy detection half of G2. G1 and G3-G6 land separately.
+
+on:
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+jobs:
+  copy-detection:
+    name: G2 no upstream file was copied
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/vllm-project/vllm.git
+          git fetch --no-tags --depth=1 upstream main
+
+      - name: Compare new a2sys files against upstream
+        run: python3 .github/scripts/detect_copies.py "origin/${{ github.base_ref }}"

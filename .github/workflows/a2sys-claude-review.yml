@@ -1,0 +1,96 @@
+name: claude review
+
+# Tier D — detection, not a gate. Findings are advisory and never block a merge.
+#
+# We drive the trigger ourselves rather than using a managed reviewer, because the daily
+# integration/* sync PRs carry the entire upstream delta and reviewing them is pure noise.
+# Managed reviewers target the base branch only and cannot skip them.
+#
+# Review criteria live in vllm/CLAUDE.md and vllm/a2sys/CLAUDE.md, which Claude reads
+# hierarchically — the nearer file governs.
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      !github.event.pull_request.draft &&
+      !startsWith(github.head_ref, 'integration/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Only upstream-file changes need this review. A pure vllm/a2sys/ PR has nothing
+      # for it to say, and copy detection is handled deterministically by a2sys-gates.yml.
+      - name: Does this PR touch upstream files?
+        id: scope
+        run: |
+          changed=$(git diff --name-only \
+            "origin/${{ github.base_ref }}...HEAD" -- vllm/ \
+            | grep -v '^vllm/a2sys/' || true)
+          if [ -n "$changed" ]; then
+            echo "touches_upstream=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "touches_upstream=false" >> "$GITHUB_OUTPUT"
+            echo "No upstream-file changes — skipping review." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Review
+        if: steps.scope.outputs.touches_upstream == 'true'
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          # OAuth token bills against the Claude subscription rather than the API.
+          # Generate with `claude setup-token`.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: >-
+            --max-turns 12
+            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git show:*),Bash(git log:*),Bash(gh pr comment:*)"
+          prompt: |
+            Review pull request #${{ github.event.pull_request.number }} of
+            ${{ github.repository }}, a private fork of vllm-project/vllm.
+
+            Read vllm/CLAUDE.md first, then vllm/a2sys/CLAUDE.md. They define the A/B/C
+            classification this review enforces. The nearer file governs a given path.
+
+            Look at the diff:
+              git diff origin/${{ github.base_ref }}...HEAD -- vllm/
+
+            Judge only what a machine cannot. CI already checks, deterministically, that no
+            upstream file was copied to a new path and that forbidden paths were untouched.
+            Do not repeat those.
+
+            Your job is the single question the rules cannot decide mechanically:
+
+              Could a registration API have handled this change instead of editing an
+              upstream file?
+
+            Work the table in vllm/CLAUDE.md section 1 row by row against the actual diff.
+            If a row applies, name the API and say what should move to vllm/a2sys/.
+            Also check, in order of value:
+              - subclassing an upstream class would have avoided the edit
+              - a seam (C) exceeds 5 lines, or its body sits in vllm/ instead of vllm/a2sys/
+              - a B or C commit is missing Upstream-status: / Removable-when: trailers
+
+            Post one comment. Korean. Lead with a verdict line:
+              "등록 API로 대체 가능: N건" or "등록 API로 대체 불가 — 제자리 수정이 맞음".
+            Then at most five findings, each as `path:line — 무엇을 → 어떤 API로`.
+            If you found nothing, say so in one line and stop. Silence is a valid review;
+            do not manufacture findings to look useful.
+
+            Post it with:
+              gh pr comment ${{ github.event.pull_request.number }} --body "<your review>"
