@@ -1,0 +1,32 @@
+# Every C (seam) we carry. A seam is a hook of 5 lines or fewer in an upstream file that
+# calls into vllm/a2sys/. It is temporary debt: the point is to get it upstreamed and then
+# delete it.
+#
+# Gates read this file:
+#   G1  each listed file's hunks must be <= budget.max_seam_hunk_lines
+#   G3  each seam must have a contract test at its `test` path, and that test must assert
+#       our code actually ran — not that the output is correct
+#
+# Adding an entry here is a design decision, so it goes through review.
+#
+# schema:
+#   id:         short slug, also the test filename
+#   file:       the upstream file the hook lives in
+#   why:        what the hook enables, and why no registration API covers it
+#   test:       contract test path
+#   upstream:   issue or PR proposing the hook upstream. Required — a seam with no
+#               upstream conversation is a permanent divergence pretending to be temporary.
+#   removable_when: the condition under which this entry is deleted
+
+seams: []
+# Example of the shape once we have one:
+#
+# seams:
+#   - id: batch_override
+#     file: vllm/v1/worker/gpu_model_runner.py
+#     why: >-
+#       Reorders the scheduled batch before execution. No registration API reaches the
+#       step loop; worker_cls would require subclassing a file with 96 commits per 90 days.
+#     test: tests/a2sys/seams/test_batch_override.py
+#     upstream: https://github.com/vllm-project/vllm/issues/NNNNN
+#     removable_when: upstream merges the hook, or the reordering moves into scheduler_cls

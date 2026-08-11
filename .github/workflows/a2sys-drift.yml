@@ -1,0 +1,79 @@
+name: drift
+
+# G6 — how far behind upstream we are.
+#
+# Not a PR check: falling behind is a property of the branch over time, not of any one
+# change. The failure mode this guards against is the one that already happened once —
+# a fork pinned to an old release while upstream moved five minors ahead, at which point
+# catching up costs more than staying current ever would have.
+#
+# Conflict difficulty compounds when two upstream changes land on the same lines, so the
+# cost of being N commits behind is superlinear in N.
+
+on:
+  schedule:
+    - cron: "0 22 * * 0-4" # 07:00 KST, Mon-Fri — after the 03:00 sync has had its say
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  # A day's upstream output is ~36 commits. Two days of unresolved sync is a warning;
+  # a week is the failure this gate exists to prevent.
+  WARN_AT: "120"
+  FAIL_AT: "400"
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Measure
+        id: m
+        run: |
+          git remote add upstream https://github.com/vllm-project/vllm.git
+          git fetch --no-tags upstream main
+          behind=$(git rev-list --count develop..upstream/main)
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+
+          # Which of the files we changed did upstream touch since our last sync?
+          ours=$(git diff --name-only upstream/main...develop -- vllm/ || true)
+          if [ -n "$ours" ]; then
+            hot=$(git log --oneline "$(git merge-base upstream/main develop)..upstream/main" \
+                    -- $ours | head -20)
+          fi
+
+          {
+            echo "### develop is **$behind** commits behind upstream/main"
+            echo
+            echo "Upstream commits touching files we changed:"
+            echo '```'
+            echo "${hot:-none}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Judge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEHIND: ${{ steps.m.outputs.behind }}
+        run: |
+          if [ "$BEHIND" -ge "$FAIL_AT" ]; then
+            gh issue create \
+              --title "drift: develop is $BEHIND commits behind upstream/main" \
+              --label enhancement \
+              --body "일일 동기화가 멈춰 있습니다. \`integration/*\` PR이 열린 채 막혀 있는지 확인하십시오. 뒤처짐이 커질수록 충돌 해결 비용은 선형이 아니라 그보다 빠르게 늘어납니다." \
+              || echo "::warning::could not open issue"
+            echo "::error::$BEHIND commits behind (fail threshold $FAIL_AT)"
+            exit 1
+          elif [ "$BEHIND" -ge "$WARN_AT" ]; then
+            echo "::warning::$BEHIND commits behind (warn threshold $WARN_AT)"
+          else
+            echo "$BEHIND commits behind. Within threshold."
+          fi
