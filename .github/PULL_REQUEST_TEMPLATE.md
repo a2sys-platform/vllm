@@ -1,20 +1,32 @@
-<!-- markdownlint-disable -->
-PLEASE FILL IN THE PR DESCRIPTION HERE ENSURING ALL CHECKLIST ITEMS (AT THE BOTTOM) HAVE BEEN CONSIDERED.
+## 무엇을 (What)
+<!-- 이 PR이 변경하는 내용을 요약 -->
 
-## Purpose
+## 왜 (Why)
+<!-- 배경·목적. 관련 이슈 연결 -->
+Closes #
 
-## Test Plan
+## 어떻게 (How)
+<!-- 주요 구현 방식·의사결정 -->
 
-## Test Result
+## 테스트 (How tested)
+<!-- 검증 방법·범위. 스크린샷/로그가 있으면 첨부 -->
+
+## 체크리스트
+- [ ] 셀프 리뷰 완료
+- [ ] 테스트 추가/갱신
+- [ ] CI 통과 확인
+- [ ] 문서 갱신 (필요 시)
 
 ---
-<details>
-<summary> Essential Elements of an Effective PR Description Checklist </summary>
+<!-- 아래는 vLLM fork 전용 항목. 상류 코드를 건드리는 PR에만 채운다 -->
 
-- [ ] The purpose of the PR, such as "Fix some issue (link existing issues this PR will resolve)".
-- [ ] The test plan, such as providing test command.
-- [ ] The test results, such as pasting the results comparison before and after, or e2e results
-- [ ] (Optional) The necessary documentation update, such as updating `supported_models.md` and `examples` for a new model.
-</details>
+## 분류 (A / B / C)
+<!-- 판정 카드 참조: https://claude.ai/code/artifact/2bcbfbc4-3d59-4c44-a472-fe6deca4bfde -->
+- [ ] **A** 순수 추가 — 상류에 원본 없음. `vllm/a2sys/` 에 위치
+- [ ] **B** 파생 — 상류 파일 제자리 수정. 등록 API로 대체 불가한 이유:
+- [ ] **C** seam — 훅 5줄 이내. 상류 이슈:
 
-**BEFORE SUBMITTING, PLEASE READ <https://docs.vllm.ai/en/latest/contributing>** (anything written below this line will be removed by GitHub Actions)
+`vllm/` 을 수정했다면 확인:
+- [ ] 등록 API 표를 대조했고 해당 없음
+- [ ] 상류 파일을 **복제하지 않았음** (제자리 수정)
+- [ ] B·C 커밋에 `Upstream-status:` / `Removable-when:` 트레일러 포함
