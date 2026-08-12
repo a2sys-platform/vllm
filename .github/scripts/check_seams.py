@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""G1b + G3 — keep seams small, declared, and covered by a contract test.
+"""Keep seams small, declared, and covered by a contract test.
 
-A seam (C) is a hook of a few lines in an upstream file that calls into vllm/a2sys/. Two
-things go wrong with seams, and both are mechanical to check:
+A seam (category C) is a hook of a few lines in an upstream file that calls into
+vllm/a2sys/. Two things go wrong with seams, and both are mechanical to check:
 
-  G1b  the hook grows until it is really an in-place rewrite wearing a seam's name
-  G3   the hook stops being reached, and nothing notices, because vLLM ignores
-       unsupported configuration silently rather than raising
+  - the hook grows until it is really an in-place rewrite wearing a seam's name
+  - the hook stops being reached, and nothing notices, because vLLM ignores unsupported
+    configuration silently rather than raising
 
 So: every seam is declared in seams/registry.yml, its hunks are capped, and each one
 carries a contract test whose job is to assert OUR CODE RAN — not that output is correct.
@@ -77,12 +77,12 @@ def main() -> int:
                 "A seam only exists to reach into an upstream file."
             )
 
-        # G3 — the contract test must exist. Whether it passes is the test job's problem.
+        # The contract test must exist. Whether it passes is the test job's problem.
         test = entry.get("test", "")
         if test and not Path(test).exists():
             failures.append(f"{sid}: contract test {test} does not exist")
 
-        # G1b — cap the hook size.
+        # Cap the hook size.
         if seam_file and Path(seam_file).exists():
             for n, size in enumerate(changed_lines_per_hunk(base, seam_file), 1):
                 if size > budget["max_seam_hunk_lines"]:
@@ -93,8 +93,8 @@ def main() -> int:
                     )
 
     # An upstream file edited by this PR that is not declared as a seam is B, which is
-    # allowed and unbudgeted — but a seam-shaped edit hiding as B skips G3, so surface
-    # small edits for the reviewer rather than failing on them.
+    # allowed and unbudgeted — but a seam-shaped edit hiding as B escapes the contract
+    # test requirement, so surface small edits for the reviewer rather than failing.
     declared = {e.get("file") for e in seams}
     small_undeclared = []
     modified = git(
@@ -109,8 +109,8 @@ def main() -> int:
 
     if small_undeclared:
         print("::notice::Small undeclared edits to upstream files. If any of these is a")
-        print("::notice::hook into vllm/a2sys/, declare it in seams/registry.yml so G3")
-        print("::notice::requires a contract test for it.")
+        print("::notice::hook into vllm/a2sys/, declare it in seams/registry.yml so a")
+        print("::notice::contract test is required for it.")
         for item in small_undeclared:
             print(f"::notice::  {item}")
 

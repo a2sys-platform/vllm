@@ -25,8 +25,9 @@ restricted_files:
     # The general_plugins entry point registering vllm.a2sys.plugin:register.
     allowed_pattern: '^[+-].*(a2sys|general_plugins|\[project\.entry-points)'
 
-# G1 budget. B (in-place edits to upstream files) is NOT counted — a large B diff is
-# normal. Only C (seams) is budgeted, and seams are declared in seams/registry.yml.
+# Seam budget. In-place edits to upstream files (category B) are NOT counted — a large B
+# diff is normal and expected. Only seams (category C) are budgeted, and every seam is
+# declared in seams/registry.yml.
 budget:
   max_seam_hunk_lines: 5
   max_seams: 8

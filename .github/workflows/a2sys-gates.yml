@@ -1,8 +1,8 @@
 name: gates
 
-# Tier C — deterministic checks. Once these are required status checks in the ruleset,
-# they are the fork's actual enforcement: the ruleset itself only does three things, and
-# everything else derives from "Require status checks to pass".
+# Deterministic policy checks. Once these are required status checks in the ruleset they
+# are the fork's actual enforcement: the ruleset itself only blocks force pushes, requires
+# a pull request, and requires status checks. Everything else derives from the third.
 #
 # Every check compares against the MERGE-BASE with the base branch, so upstream commits
 # arriving through the daily sync are excluded by construction. This is why a push ruleset
@@ -17,8 +17,8 @@ permissions:
   contents: read
 
 jobs:
-  static:
-    name: G1 G2 N3
+  policy:
+    name: policy
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -39,22 +39,22 @@ jobs:
           git fetch --no-tags --depth=1 upstream main
 
       # Each check runs even when an earlier one failed: one report beats five round trips.
-      - name: G1a forbidden paths
+      - name: forbidden paths
         if: '!cancelled()'
         run: python3 .github/scripts/check_paths.py "origin/${{ github.base_ref }}"
 
-      - name: G1b seam budget + G3 contract tests exist
+      - name: seam size and contract coverage
         if: '!cancelled()'
         run: python3 .github/scripts/check_seams.py "origin/${{ github.base_ref }}"
 
-      - name: G2a no upstream file was copied
+      - name: no copied upstream files
         if: '!cancelled()'
         run: python3 .github/scripts/detect_copies.py "origin/${{ github.base_ref }}"
 
-      - name: G2b import direction
+      - name: import direction
         if: '!cancelled()'
         run: python3 .github/scripts/check_imports.py
 
-      - name: N3 commit trailers
+      - name: removal trailers
         if: '!cancelled()'
         run: python3 .github/scripts/check_trailers.py "origin/${{ github.base_ref }}"

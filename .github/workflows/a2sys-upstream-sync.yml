@@ -29,7 +29,8 @@ jobs:
           ref: develop
           fetch-depth: 0
 
-      # N7 — never stack integration PRs. Yesterday's failure must be resolved first.
+      # Never stack integration PRs: yesterday's failure must be resolved first, or the
+      # conflicts compound and the next resolution is harder than two separate ones.
       - name: Fail if a sync PR is still open
         env:
           GH_TOKEN: ${{ github.token }}
@@ -37,7 +38,7 @@ jobs:
           open=$(gh pr list --state open --json headRefName \
             --jq '[.[] | select(.headRefName | startswith("integration/upstream-"))] | length')
           if [ "$open" -ne 0 ]; then
-            echo "::error::A previous sync PR is still open. Resolve it before syncing again (N7)."
+            echo "::error::A previous sync PR is still open. Resolve it before syncing again."
             exit 1
           fi
 
@@ -46,7 +47,7 @@ jobs:
           git remote add upstream "$UPSTREAM"
           git fetch --no-tags --prune upstream main
 
-      # G6 — how far behind are we
+      # How far behind are we
       - name: Report distance
         run: |
           behind=$(git rev-list --count develop..upstream/main)

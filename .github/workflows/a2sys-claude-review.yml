@@ -1,6 +1,6 @@
 name: claude review
 
-# Tier D — detection, not a gate. Findings are advisory and never block a merge.
+# Detection, not a gate. Findings are advisory and never block a merge.
 #
 # We drive the trigger ourselves rather than using a managed reviewer, because the daily
 # integration/* sync PRs carry the entire upstream delta and reviewing them is pure noise.

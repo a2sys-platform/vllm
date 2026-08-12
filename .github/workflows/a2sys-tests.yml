@@ -1,17 +1,16 @@
 name: tests
 
-# G5 (T0) and G4 (both model runners).
+# The CPU-only suite, run once under each model runner.
 #
-# T0 is the CPU-only tier: about 8,580 tests covering config schemas, SchedulerOutput
-# shape, KV connector interfaces, the model registry, attention backend enums, parsers,
-# and the import graph. It catches upstream contract changes, and it catches NO accuracy
-# regressions whatsoever — that needs T1, which needs a GPU we do not have yet.
+# About 8,580 tests covering config schemas, SchedulerOutput shape, KV connector
+# interfaces, the model registry, attention backend enums, parsers, and the import graph.
+# It catches upstream contract changes, and it catches NO accuracy regressions whatsoever —
+# that needs a GPU suite, which needs a GPU we do not have yet.
 #
-# G4 runs the runner-sensitive slice under both model runners. vLLM has two
-# (vllm/v1/worker/gpu_model_runner.py and vllm/v1/worker/gpu/model_runner.py), selects
-# between them automatically, and SILENTLY IGNORES configuration the selected one does
-# not support. A seam wired into only one runner passes every other check and then does
-# nothing in production.
+# Both runners, because vLLM has two (vllm/v1/worker/gpu_model_runner.py and
+# vllm/v1/worker/gpu/model_runner.py), selects between them automatically, and SILENTLY
+# IGNORES configuration the selected one does not support. A seam wired into only one
+# runner passes every other check and then does nothing in production.
 
 on:
   pull_request:
@@ -24,14 +23,13 @@ env:
   VLLM_USE_PRECOMPILED: "1"
 
 jobs:
-  t0:
-    name: G5 T0 (runner v${{ matrix.runner_version }})
+  cpu-suite:
+    name: cpu suite (model runner v${{ matrix.runner_version }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        # G4 — the same contract tests under both runners.
         runner_version: ["1", "2"]
     steps:
       - uses: actions/checkout@v5
@@ -56,14 +54,13 @@ jobs:
           uv pip install -e . --torch-backend=auto
           uv pip install -r requirements/test/cpu.txt
 
-      - name: T0 — v1 core, both scheduler paths
+      - name: v1 core, both scheduler paths
         env:
           VLLM_USE_V2_MODEL_RUNNER: ${{ matrix.runner_version == '2' && '1' || '0' }}
         working-directory: tests
-        run: |
-          ../.venv/bin/python -m pytest -q -m cpu_test v1/core
+        run: ../.venv/bin/python -m pytest -q -m cpu_test v1/core
 
-      - name: T0 — registry contracts
+      - name: registry contracts
         working-directory: tests
         run: |
           # test_attention_backend_registry.py is NOT run by any upstream .buildkite step.
@@ -76,7 +73,7 @@ jobs:
             transformers_utils/test_config_parser_registry.py \
             v1/test_kv_cache_spec_registry.py
 
-      - name: T0 — config, parsers, renderers
+      - name: config, parsers, renderers
         working-directory: tests
         run: |
           ../.venv/bin/python -m pytest -q \
@@ -84,20 +81,20 @@ jobs:
             test_pooling_params.py test_sampling_params.py \
             renderers reasoning tool_parsers tokenizers_ parser transformers_utils config
 
-      - name: T0 — cpu_test slices
+      - name: multimodal, kv connector, metrics
         working-directory: tests
         run: |
           ../.venv/bin/python -m pytest -q -m cpu_test \
             multimodal v1/kv_connector/unit v1/metrics
 
-      - name: T0 — import graph
+      - name: import graph
         working-directory: tests
         run: ../.venv/bin/python standalone_tests/lazy_imports.py
 
-      # G3 — seam contract tests assert our code RAN, not that output is correct.
-      # Skipped silently while no seams are declared; check_seams.py enforces that each
-      # declared seam has a test file.
-      - name: G3 — seam contracts
+      # A seam contract test asserts our code RAN, not that output is correct — vLLM
+      # ignores unsupported configuration silently, so "it did nothing" is the failure
+      # mode these guard against. check_seams.py enforces that each declared seam has one.
+      - name: seam contracts
         working-directory: tests
         env:
           VLLM_USE_V2_MODEL_RUNNER: ${{ matrix.runner_version == '2' && '1' || '0' }}

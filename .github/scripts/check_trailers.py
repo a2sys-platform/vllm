@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""N3 — every commit that touches an upstream file declares when it can be deleted.
+"""Every commit that touches an upstream file declares when it can be deleted.
 
 GitHub rulesets have no commit-message rule, so this lives in CI.
 

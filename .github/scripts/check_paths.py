@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""G1a — fail when the diff touches a path the policy forbids.
+"""Fail when the diff touches a path the fork policy forbids.
 
 Compares against the merge-base with the base branch, so only OUR changes are considered.
 Upstream commits arriving through the daily sync merge are excluded by construction: after

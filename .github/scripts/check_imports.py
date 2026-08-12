@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""G2b — the dependency between upstream code and ours runs one way only.
+"""The dependency between upstream code and ours runs one way only.
 
 vllm/a2sys/ may import from vllm/. The reverse is a seam, and seams are declared.
 

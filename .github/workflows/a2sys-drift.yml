@@ -1,6 +1,6 @@
 name: drift
 
-# G6 — how far behind upstream we are.
+# How far behind upstream we are.
 #
 # Not a PR check: falling behind is a property of the branch over time, not of any one
 # change. The failure mode this guards against is the one that already happened once —

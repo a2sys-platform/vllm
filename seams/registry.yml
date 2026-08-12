@@ -2,10 +2,10 @@
 # calls into vllm/a2sys/. It is temporary debt: the point is to get it upstreamed and then
 # delete it.
 #
-# Gates read this file:
-#   G1  each listed file's hunks must be <= budget.max_seam_hunk_lines
-#   G3  each seam must have a contract test at its `test` path, and that test must assert
-#       our code actually ran — not that the output is correct
+# The policy checks read this file:
+#   - each listed file's hunks must stay within budget.max_seam_hunk_lines
+#   - each seam must have a contract test at its `test` path, and that test must assert
+#     our code actually ran — not that the output is correct
 #
 # Adding an entry here is a design decision, so it goes through review.
 #
