@@ -1,5 +1,12 @@
 name: tests
 
+# PROVISIONAL. The integration cadence is settled — upstream/main merges into develop every
+# weekday — but how much verification each sync PR should carry is not. As written this runs
+# the full suite on every pull request, including the daily sync, which is roughly 500 jobs a
+# year. Whether to keep that, or gate the heavy suite on the incoming delta intersecting
+# files we actually modified and run it nightly instead, waits on hardware: there is no GPU
+# yet, so the tier that would catch accuracy regressions cannot run at all.
+#
 # The CPU-only suite, run once under each model runner.
 #
 # About 8,580 tests covering config schemas, SchedulerOutput shape, KV connector
