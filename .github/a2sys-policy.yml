@@ -1,0 +1,33 @@
+# Single source of truth for the path rules the gates enforce.
+# Mirrors the path table in the fork operating rules document.
+
+# Our code. Everything here is category A and exempt from the upstream rules.
+ours_prefix: vllm/a2sys/
+
+# Neither modified nor added to. New CUDA kernels go in vllm/a2sys/ops/ as a separate
+# torch extension: CMakeLists.txt lists .cu files explicitly rather than globbing, so a
+# new kernel would drag in an edit to a file upstream touches 51 times per 90 days.
+forbidden_trees:
+  - csrc/
+  - cmake/
+  - rust/
+  - .buildkite/
+
+# Upstream files we never edit. New files alongside them are fine.
+forbidden_files:
+  - setup.py
+  - vllm/envs.py            # our env vars live in vllm/a2sys/envs.py
+  - vllm/engine/arg_utils.py # our knobs live under --additional-config
+
+# Files where only one region may change.
+restricted_files:
+  pyproject.toml:
+    # The general_plugins entry point registering vllm.a2sys.plugin:register.
+    allowed_pattern: '^[+-].*(a2sys|general_plugins|\[project\.entry-points)'
+
+# Seam budget. In-place edits to upstream files (category B) are NOT counted — a large B
+# diff is normal and expected. Only seams (category C) are budgeted, and every seam is
+# declared in seams/registry.yml.
+budget:
+  max_seam_hunk_lines: 5
+  max_seams: 8

@@ -1,0 +1,60 @@
+name: gates
+
+# Deterministic policy checks. Once these are required status checks in the ruleset they
+# are the fork's actual enforcement: the ruleset itself only blocks force pushes, requires
+# a pull request, and requires status checks. Everything else derives from the third.
+#
+# Every check compares against the MERGE-BASE with the base branch, so upstream commits
+# arriving through the daily sync are excluded by construction. This is why a push ruleset
+# cannot replace these: push rules see every commit in the push, including upstream's,
+# and those legitimately touch csrc/.
+
+on:
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install --quiet pyyaml
+
+      - name: Fetch refs
+        run: |
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          git remote add upstream https://github.com/vllm-project/vllm.git
+          git fetch --no-tags --depth=1 upstream main
+
+      # Each check runs even when an earlier one failed: one report beats five round trips.
+      - name: forbidden paths
+        if: '!cancelled()'
+        run: python3 .github/scripts/check_paths.py "origin/${{ github.base_ref }}"
+
+      - name: seam size and contract coverage
+        if: '!cancelled()'
+        run: python3 .github/scripts/check_seams.py "origin/${{ github.base_ref }}"
+
+      - name: no copied upstream files
+        if: '!cancelled()'
+        run: python3 .github/scripts/detect_copies.py "origin/${{ github.base_ref }}"
+
+      - name: import direction
+        if: '!cancelled()'
+        run: python3 .github/scripts/check_imports.py
+
+      - name: removal trailers
+        if: '!cancelled()'
+        run: python3 .github/scripts/check_trailers.py "origin/${{ github.base_ref }}"

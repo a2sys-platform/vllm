@@ -1,0 +1,113 @@
+name: tests
+
+# PROVISIONAL. The integration cadence is settled — upstream/main merges into develop every
+# weekday — but how much verification each sync PR should carry is not. As written this runs
+# the full suite on every pull request, including the daily sync, which is roughly 500 jobs a
+# year. Whether to keep that, or gate the heavy suite on the incoming delta intersecting
+# files we actually modified and run it nightly instead, waits on hardware: there is no GPU
+# yet, so the tier that would catch accuracy regressions cannot run at all.
+#
+# The CPU-only suite, run once under each model runner.
+#
+# About 8,580 tests covering config schemas, SchedulerOutput shape, KV connector
+# interfaces, the model registry, attention backend enums, parsers, and the import graph.
+# It catches upstream contract changes, and it catches NO accuracy regressions whatsoever —
+# that needs a GPU suite, which needs a GPU we do not have yet.
+#
+# Both runners, because vLLM has two (vllm/v1/worker/gpu_model_runner.py and
+# vllm/v1/worker/gpu/model_runner.py), selects between them automatically, and SILENTLY
+# IGNORES configuration the selected one does not support. A seam wired into only one
+# runner passes every other check and then does nothing in production.
+
+on:
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+env:
+  VLLM_USE_PRECOMPILED: "1"
+
+jobs:
+  cpu-suite:
+    name: cpu suite (model runner v${{ matrix.runner_version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_version: ["1", "2"]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: |
+          # get_base_commit_in_main_branch() resolves the precompiled wheel from the
+          # merge-base with upstream/main, so upstream must be present.
+          git remote add upstream https://github.com/vllm-project/vllm.git
+          git fetch --no-tags upstream main
+          uv venv --python 3.12
+          uv pip install -e . --torch-backend=auto
+          uv pip install -r requirements/test/cpu.txt
+
+      - name: v1 core, both scheduler paths
+        env:
+          VLLM_USE_V2_MODEL_RUNNER: ${{ matrix.runner_version == '2' && '1' || '0' }}
+        working-directory: tests
+        run: ../.venv/bin/python -m pytest -q -m cpu_test v1/core
+
+      - name: registry contracts
+        working-directory: tests
+        run: |
+          # test_attention_backend_registry.py is NOT run by any upstream .buildkite step.
+          # If we register an attention backend, we are the only ones holding this line.
+          ../.venv/bin/python -m pytest -q \
+            test_attention_backend_registry.py \
+            model_executor/model_loader/test_registry.py \
+            multimodal/test_registry.py \
+            tokenizers_/test_registry.py \
+            transformers_utils/test_config_parser_registry.py \
+            v1/test_kv_cache_spec_registry.py
+
+      - name: config, parsers, renderers
+        working-directory: tests
+        run: |
+          ../.venv/bin/python -m pytest -q \
+            test_envs.py test_inputs.py test_outputs.py \
+            test_pooling_params.py test_sampling_params.py \
+            renderers reasoning tool_parsers tokenizers_ parser transformers_utils config
+
+      - name: multimodal, kv connector, metrics
+        working-directory: tests
+        run: |
+          ../.venv/bin/python -m pytest -q -m cpu_test \
+            multimodal v1/kv_connector/unit v1/metrics
+
+      - name: import graph
+        working-directory: tests
+        run: ../.venv/bin/python standalone_tests/lazy_imports.py
+
+      # A seam contract test asserts our code RAN, not that output is correct — vLLM
+      # ignores unsupported configuration silently, so "it did nothing" is the failure
+      # mode these guard against. check_seams.py enforces that each declared seam has one.
+      - name: seam contracts
+        working-directory: tests
+        env:
+          VLLM_USE_V2_MODEL_RUNNER: ${{ matrix.runner_version == '2' && '1' || '0' }}
+        run: |
+          if [ -d a2sys/seams ] && ls a2sys/seams/test_*.py >/dev/null 2>&1; then
+            ../.venv/bin/python -m pytest -q a2sys/seams
+          else
+            echo "No seam contract tests yet." >> "$GITHUB_STEP_SUMMARY"
+          fi
