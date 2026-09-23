@@ -1663,13 +1663,16 @@ def test_split_indexer_prefill_chunks_single_request_overflow():
     assert out == expected
 
 
-# Power-of-two, GLM's padded tile, and atomic fallback, with reused buffers.
+# Power-of-two, GLM's padded tile, and a width that walks several tiles, with
+# reused buffers.
 @pytest.mark.parametrize(
     "num_topk_tokens,reuse_buffers",
     [(128, False), (2176, False), (2176, True), (4224, False), (4224, True)],
 )
 def test_triton_convert_returns_valid_counts(num_topk_tokens: int, reuse_buffers: bool):
-    """Test that return_valid_counts correctly counts non-negative indices."""
+    """Test that return_valid_counts counts non-negative indices and compacts
+    them in the input column order (the sparse attention kernels' numerics
+    depend on that order, so a reshuffled prefix changes model output)."""
     device = torch.device(DEVICE_TYPE)
     num_tokens = 8
     num_requests = 2
@@ -1736,8 +1739,8 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int, reuse_buffers
     )
     assert isinstance(result_only, torch.Tensor)
     for row, num_valid in enumerate(expected_valid):
-        compact_valid = result[row, :num_valid].sort().values
-        original_valid = result_only[row][result_only[row] >= 0].sort().values
+        compact_valid = result[row, :num_valid]
+        original_valid = result_only[row][result_only[row] >= 0]
         torch.testing.assert_close(compact_valid, original_valid, rtol=0, atol=0)
         assert torch.all(result[row, num_valid:] == -1)
 

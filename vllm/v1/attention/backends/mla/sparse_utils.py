@@ -75,7 +75,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         block_n: int
         has_prefill_workspace: bool
         count_valid: bool
-        single_tile: bool
+        tiles_per_program: int
         compact_to_front: bool
         dcp_size: int
         dcp_rank: int
@@ -101,16 +101,17 @@ class ConvertReqIndexToGlobalIndexKernel(
         BLOCK_STRIDE_ROWS: tl.constexpr,
         BLOCK_N: tl.constexpr,  # tile width along columns
         NUM_TOPK_TOKENS: tl.constexpr,
+        # Column tiles one program walks in sequence. Counting makes this the whole
+        # query (the grid then has one program per query), so its count is an
+        # in-register reduction and needs no atomic.
+        TILES_PER_PROGRAM: tl.constexpr,
         HAS_PREFILL: tl.constexpr,
         COUNT_VALID: tl.constexpr,  # whether to count valid indices
-        # BLOCK_N >= NUM_TOPK_TOKENS: one program owns the query, so its count
-        # is an in-register reduction and needs no atomic.
-        SINGLE_TILE: tl.constexpr,
-        # When set, scatter valid slots to a contiguous prefix [0, valid_count) using
-        # valid_count_ptr as an atomic slot allocator (DCP filtering leaves interior
-        # -1 gaps; the trtllm-gen sparse kernel reads the first valid_count entries).
-        # Requires COUNT_VALID; multi-tile output must be pre-filled with -1. The
-        # prefix is unspecified (only the selected set matters).
+        # When set, scatter valid slots to a contiguous prefix [0, valid_count)
+        # (DCP filtering leaves interior -1 gaps; the trtllm-gen sparse kernel reads
+        # the first valid_count entries). Requires COUNT_VALID; the program writes
+        # its own padding. The prefix keeps the input column order, which the sparse
+        # attention kernels' numerics depend on.
         COMPACT_TO_FRONT: tl.constexpr,
         # DCP de-interleave: with DCP_SIZE == 1 these are an exact no-op
         DCP_SIZE: tl.constexpr,
@@ -125,101 +126,103 @@ class ConvertReqIndexToGlobalIndexKernel(
         out_stride1,
     ):
         # program_id(0) -> token_id (row)
-        # program_id(1) -> tile index along columns
+        # program_id(1) -> index of the tile group this program walks
         token_id = tl.program_id(0)
         tile_id = tl.program_id(1)
-
-        # Each program covers BLOCK_N consecutive columns
-        indice_id = tile_id * BLOCK_N + tl.arange(0, BLOCK_N)
 
         # Load request id for this token (no mask: grid is exact)
         req = tl.load(req_id_ptr + token_id)
 
-        # Load token indices for this tile
-        ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
-        tok = tl.load(ti_ptr, mask=indice_id < NUM_TOPK_TOKENS, other=-1)
-
-        # Only token == -1 should propagate as -1
-        is_invalid_tok = tok < 0
         is_prefill = False
+        prefill_req_id = 0
         if HAS_PREFILL:
             prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
             is_prefill = prefill_req_id >= 0
 
-        # DCP de-interleave the global token id into this rank's local slot.
-        # Tokens are interleaved in groups of DCP_INTERLEAVE across ranks. With
-        # DCP_SIZE == 1 (and any interleave) owning_rank == 0 == DCP_RANK (never
-        # remote) and local_idx == tok, so this reduces to the non-DCP path; with
-        # DCP_INTERLEAVE == 1 it reduces to plain round-robin (tok % / // DCP_SIZE).
-        owning_rank = (tok // DCP_INTERLEAVE) % DCP_SIZE
-        is_remote = owning_rank != DCP_RANK
-        local_idx = (
-            tok // (DCP_SIZE * DCP_INTERLEAVE)
-        ) * DCP_INTERLEAVE + tok % DCP_INTERLEAVE
-
-        # Compute block id and in-block offset
-        block_id = local_idx // BLOCK_SIZE
-        inblock_off = local_idx % BLOCK_SIZE
-
-        # Guard block_table access
-        valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
-        bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
-        is_invalid_tok |= ~valid_block | (is_remote & ~is_prefill)
-        base = tl.load(bt_ptr, mask=valid_block & ~is_prefill & ~is_remote, other=0)
-        out_val = base * BLOCK_STRIDE_ROWS + inblock_off
-
-        # Override with prefill output if prefill is enabled
-        if HAS_PREFILL:
-            workspace_start = tl.load(
-                workspace_starts_ptr + prefill_req_id, mask=is_prefill, other=0
+        # Valid slots this row has already emitted, carried across the tiles.
+        valid_so_far = tl.zeros((), dtype=tl.int32)
+        for tile in tl.static_range(TILES_PER_PROGRAM):
+            # Each tile covers BLOCK_N consecutive columns
+            indice_id = (tile_id * TILES_PER_PROGRAM + tile) * BLOCK_N + tl.arange(
+                0, BLOCK_N
             )
-            # Under DCP the prefill workspace is the all-gather of every rank's
-            # shard, rank-major. With DCP_SIZE == 1 this is workspace_start + tok.
-            prefill_out = (
-                owning_rank * workspace_rank_stride + workspace_start + local_idx
-            )
-            out_val = tl.where(is_prefill, prefill_out, out_val)
-        out_val = tl.where(is_invalid_tok, -1, out_val)
+            in_row = indice_id < NUM_TOPK_TOKENS
+
+            # Load token indices for this tile
+            ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
+            tok = tl.load(ti_ptr, mask=in_row, other=-1)
+
+            # Only token == -1 should propagate as -1
+            is_invalid_tok = tok < 0
+
+            # DCP de-interleave the global token id into this rank's local slot.
+            # Tokens are interleaved in groups of DCP_INTERLEAVE across ranks. With
+            # DCP_SIZE == 1 (and any interleave) owning_rank == 0 == DCP_RANK (never
+            # remote) and local_idx == tok, so this reduces to the non-DCP path; with
+            # DCP_INTERLEAVE == 1 it reduces to plain round-robin (tok % / //
+            # DCP_SIZE).
+            owning_rank = (tok // DCP_INTERLEAVE) % DCP_SIZE
+            is_remote = owning_rank != DCP_RANK
+            local_idx = (
+                tok // (DCP_SIZE * DCP_INTERLEAVE)
+            ) * DCP_INTERLEAVE + tok % DCP_INTERLEAVE
+
+            # Compute block id and in-block offset
+            block_id = local_idx // BLOCK_SIZE
+            inblock_off = local_idx % BLOCK_SIZE
+
+            # Guard block_table access
+            valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
+            bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
+            is_invalid_tok |= ~valid_block | (is_remote & ~is_prefill)
+            base = tl.load(bt_ptr, mask=valid_block & ~is_prefill & ~is_remote, other=0)
+            out_val = base * BLOCK_STRIDE_ROWS + inblock_off
+
+            # Override with prefill output if prefill is enabled
+            if HAS_PREFILL:
+                workspace_start = tl.load(
+                    workspace_starts_ptr + prefill_req_id, mask=is_prefill, other=0
+                )
+                # Under DCP the prefill workspace is the all-gather of every rank's
+                # shard, rank-major. With DCP_SIZE == 1 this is workspace_start + tok.
+                prefill_out = (
+                    owning_rank * workspace_rank_stride + workspace_start + local_idx
+                )
+                out_val = tl.where(is_prefill, prefill_out, out_val)
+            out_val = tl.where(is_invalid_tok, -1, out_val)
+
+            is_valid = (~is_invalid_tok).to(tl.int32)
+            if COMPACT_TO_FRONT:
+                # Scatter valid slots to a contiguous prefix, keeping the input
+                # column order: an exclusive prefix sum places this tile's valid
+                # lanes after what earlier tiles of the row emitted.
+                dest = valid_so_far + tl.cumsum(is_valid) - is_valid
+                out_ptr_dest = out_ptr + token_id * out_stride0 + dest * out_stride1
+                tl.store(out_ptr_dest, out_val, mask=is_valid == 1)
+            else:
+                # Store results in place (input column == output column).
+                out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
+                tl.store(out_ptr_ij, out_val, mask=in_row)
+
+            if COUNT_VALID:
+                valid_so_far += tl.sum(is_valid)
+
+        # One program owns the row, so this reduction *is* the row total.
+        if COUNT_VALID:
+            tl.store(valid_count_ptr + token_id, valid_so_far)
 
         if COMPACT_TO_FRONT:
-            # Scatter valid slots to a contiguous prefix. A per-tile exclusive prefix
-            # sum gives each valid lane a distinct local offset; one atomic add of the
-            # tile's valid count reserves a contiguous base across racing tiles. The
-            # out buffer is pre-filled with -1, so unwritten tail slots stay -1.
-            # With no racing tiles the base is 0 and the allocator becomes a store.
-            is_valid = (~is_invalid_tok).to(tl.int32)
-            local_offset = tl.cumsum(is_valid) - is_valid
-            tile_valid_count = tl.sum(is_valid)
-            if SINGLE_TILE:
-                base = 0
-                tl.store(valid_count_ptr + token_id, tile_valid_count)
-            else:
-                base = tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
-            dest = base + local_offset
-            out_ptr_dest = out_ptr + token_id * out_stride0 + dest * out_stride1
-            tl.store(out_ptr_dest, out_val, mask=is_valid == 1)
-            if SINGLE_TILE:
-                # This program owns both the compacted prefix and its padding.
-                # The stores are disjoint, so no separate initialization is needed.
+            # This program owns both the compacted prefix and its padding. The
+            # stores are disjoint, so the buffer needs no separate initialization.
+            for tile in tl.static_range(TILES_PER_PROGRAM):
+                indice_id = (tile_id * TILES_PER_PROGRAM + tile) * BLOCK_N + tl.arange(
+                    0, BLOCK_N
+                )
                 tl.store(
                     out_ptr + token_id * out_stride0 + indice_id * out_stride1,
                     -1,
-                    mask=(indice_id >= tile_valid_count)
-                    & (indice_id < NUM_TOPK_TOKENS),
+                    mask=(indice_id >= valid_so_far) & (indice_id < NUM_TOPK_TOKENS),
                 )
-        else:
-            # Store results in place (input column == output column).
-            out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
-            tl.store(out_ptr_ij, out_val, mask=indice_id < NUM_TOPK_TOKENS)
-
-            # Accumulate the tile's valid count into the row total; a single tile's
-            # reduction *is* the total.
-            if COUNT_VALID:
-                tile_valid_count = tl.sum((~is_invalid_tok).to(tl.int32))
-                if SINGLE_TILE:
-                    tl.store(valid_count_ptr + token_id, tile_valid_count)
-                else:
-                    tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
 
     # Keep the warmup wrapper interface while exposing a descriptive CUDA symbol.
     kernel = sparse_mla_index_remap_kernel
@@ -243,10 +246,10 @@ class ConvertReqIndexToGlobalIndexKernel(
         return self.CompileKey(
             block_size=BLOCK_SIZE,
             block_stride_rows=BLOCK_STRIDE_ROWS,
-            block_n=tiling[1],
+            block_n=tiling[0],
             has_prefill_workspace=HAS_PREFILL_WORKSPACE,
             count_valid=COUNT_VALID,
-            single_tile=tiling[0],
+            tiles_per_program=tiling[1],
             compact_to_front=COMPACT_TO_FRONT,
             dcp_size=DCP_SIZE,
             dcp_rank=DCP_RANK,
@@ -404,17 +407,17 @@ class ConvertReqIndexToGlobalIndexKernel(
         DCP_RANK: int,
         DCP_INTERLEAVE: int,
     ) -> LaunchSpec:
-        single_tile, block_n, tiles_per_row, num_warps = _remap_tiling(
+        block_n, tiles_per_program, grid_tiles, num_warps = _remap_tiling(
             NUM_TOPK_TOKENS, BLOCK_N, COUNT_VALID
         )
-        # Exact 2D grid: tokens × column tiles
-        return (req_id.shape[0], tiles_per_row), dict(
+        # Exact 2D grid: tokens × tile groups
+        return (req_id.shape[0], grid_tiles), dict(
             valid_count_ptr=valid_counts,
             prefill_request_id_ptr=prefill_workspace_request_ids,
             workspace_starts_ptr=prefill_workspace_starts,
             BLOCK_N=block_n,
+            TILES_PER_PROGRAM=tiles_per_program,
             HAS_PREFILL=HAS_PREFILL_WORKSPACE,
-            SINGLE_TILE=single_tile,
             # Strides in elements
             bt_stride0=block_table.stride(0),
             bt_stride1=block_table.stride(1),
@@ -426,28 +429,33 @@ class ConvertReqIndexToGlobalIndexKernel(
         )
 
 
+# Widest counting tile. Every top-k width in tree fits in one, so the walk is
+# unused today; past it, walking beats widening -- a row of 8192 takes 11.3us in
+# two tiles against 12.0 in one on B200.
+_MAX_TILE_WIDTH = 4096
+
+
 def _remap_tiling(
     NUM_TOPK_TOKENS: int, BLOCK_N: int, count_valid: bool
-) -> tuple[bool, int, int, int]:
+) -> tuple[int, int, int, int]:
     """Pick the column tiling for the index remap kernel.
 
     Counting the valid slots per row is the only reason the column tiles have to
     talk to each other, so when counting give one program the whole row: the
     count becomes an in-register reduction plus a plain store, needing neither
-    atomics nor a zero-initialized counter. Pad modest non-power-of-two widths
-    (including GLM's 2176 entries) to one tile; larger widths stay tiled and atomic.
+    atomics nor a zero-initialized counter, and the compacted prefix comes out in
+    the input column order. A tile is one ``tl.arange``, so it has to be a power
+    of two; a row wider than ``_MAX_TILE_WIDTH`` is walked one tile at a time,
+    carrying the running count forward, which keeps both properties at any width.
 
     Returns:
-        (single_tile, block_n, tiles_per_row, num_warps)
+        (block_n, tiles_per_program, grid_tiles, num_warps)
 
     """
-    padded_width = triton.next_power_of_2(NUM_TOPK_TOKENS)
-    single_tile = count_valid and (
-        padded_width == NUM_TOPK_TOKENS or padded_width <= 4096
-    )
-    if single_tile:
-        return True, padded_width, 1, 8
-    return False, BLOCK_N, NUM_TOPK_TOKENS // BLOCK_N, 4
+    if count_valid:
+        block_n = min(triton.next_power_of_2(NUM_TOPK_TOKENS), _MAX_TILE_WIDTH)
+        return block_n, cdiv(NUM_TOPK_TOKENS, block_n), 1, 8
+    return BLOCK_N, 1, NUM_TOPK_TOKENS // BLOCK_N, 4
 
 
 def triton_convert_req_index_to_global_index(
@@ -488,7 +496,9 @@ def triton_convert_req_index_to_global_index(
         starts for each prefill request
 
     When return_valid_counts is True, also returns the count of valid (non -1)
-    indices per row, computed during the same kernel pass (no extra overhead).
+    indices per row, computed during the same kernel pass (no extra overhead),
+    and packs each row's valid entries into ``[0, valid_count)`` in their input
+    column order.
     """
     assert req_id.dtype == torch.int32
     assert block_table.dtype == torch.int32
@@ -512,33 +522,23 @@ def triton_convert_req_index_to_global_index(
     num_tokens = req_id.shape[0]
     max_num_blocks_per_req = block_table.shape[1]
 
-    single_tile, _, _, _ = _remap_tiling(NUM_TOPK_TOKENS, BLOCK_N, return_valid_counts)
-
     # Ensure contiguous tensors on the same device
     req_id_c = req_id.contiguous()
     block_table_c = block_table.contiguous()
     token_indices_c = token_indices.contiguous()
-    # Only multi-tile compaction needs separate padding initialization.
+    # The compaction writes its own padding, so neither buffer needs a pre-fill.
     if out is None:
-        out = (
-            torch.full_like(token_indices_c, -1)
-            if return_valid_counts and not single_tile
-            else torch.empty_like(token_indices_c)
-        )
+        out = torch.empty_like(token_indices_c)
     else:
         assert out.dtype == token_indices_c.dtype
         assert out.device == token_indices_c.device
         assert out.shape == token_indices_c.shape
         assert out.is_contiguous()
-        if return_valid_counts and not single_tile:
-            out.fill_(-1)
 
     valid_counts: torch.Tensor | None = None
     if return_valid_counts:
         if valid_counts_out is None:
-            # Zero-init only matters for the atomic accumulation path.
-            alloc = torch.empty if single_tile else torch.zeros
-            valid_counts = alloc(
+            valid_counts = torch.empty(
                 num_tokens, dtype=torch.int32, device=token_indices.device
             )
         else:
@@ -547,8 +547,6 @@ def triton_convert_req_index_to_global_index(
             assert valid_counts_out.shape == (num_tokens,)
             assert valid_counts_out.is_contiguous()
             valid_counts = valid_counts_out
-            if not single_tile:
-                valid_counts.zero_()
 
     # Prepare prefill pointers
     if HAS_PREFILL_WORKSPACE:
@@ -609,8 +607,8 @@ def triton_filter_and_convert_dcp_index(
     leaves the rest ``-1``. DCP filtering marks non-owned slots ``-1`` and so
     creates interior gaps; the trtllm-gen sparse kernel reads the first
     ``valid_count`` entries of each row, so they must be a contiguous prefix.
-    Compaction is fused into the kernel (atomic slot allocator) rather than a
-    separate sort/gather pass. Prefix order is unspecified (only the set matters).
+    Compaction is fused into the kernel rather than a separate sort/gather pass,
+    and keeps the input column order.
     """
     assert dcp_size >= 1
     assert 0 <= dcp_rank < dcp_size
@@ -646,23 +644,17 @@ def triton_filter_and_convert_dcp_index(
     block_table_c = block_table.contiguous()
     token_indices_c = token_indices.contiguous()
 
-    # The compaction uses the valid-count buffer as a slot allocator, so it
-    # requires counting. Only the multi-tile path needs pre-filled padding.
+    # The compaction places each valid slot after the ones before it in the row,
+    # so it requires counting. It writes its own padding, so out needs no pre-fill.
     count_valid = return_valid_counts or compact_valid_to_front
 
-    # The compaction builds on the counting, so it shares the tiling.
-    single_tile, _, _, _ = _remap_tiling(NUM_TOPK_TOKENS, BLOCK_N, count_valid)
-
-    if compact_valid_to_front and not single_tile:
-        out = torch.full_like(token_indices_c, -1)
-    else:
-        out = torch.empty_like(token_indices_c)
+    out = torch.empty_like(token_indices_c)
 
     valid_counts: torch.Tensor | None = None
     if count_valid:
-        # Zero-init only matters for the atomic accumulation path.
-        alloc = torch.empty if single_tile else torch.zeros
-        valid_counts = alloc(num_tokens, dtype=torch.int32, device=token_indices.device)
+        valid_counts = torch.empty(
+            num_tokens, dtype=torch.int32, device=token_indices.device
+        )
 
     _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL(
         req_id_c,

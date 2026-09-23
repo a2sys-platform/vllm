@@ -688,11 +688,10 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
     assert valid == 4
     assert (out[0, :valid] >= 0).all()
     assert (out[0, valid:] == -1).all()
-    # In-kernel compaction packs valid slots to the front; prefix order is
-    # unspecified, so compare as a set.
+    # In-kernel compaction packs valid slots to the front, in input column order.
     block_stride_rows = block_stride_rows or block_size
     expected_base = 10 * block_stride_rows
-    assert set(out[0, :valid].cpu().tolist()) == set(
+    assert out[0, :valid].cpu().tolist() == list(
         range(expected_base, expected_base + block_size)
     )
 
@@ -700,15 +699,16 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("interleave", [1, 2])
 @pytest.mark.parametrize("dcp_rank", [0, 1])
-# Include padded single-tile compaction and the multi-tile atomic fallback.
+# Include an exact tile, GLM's padded tile, and a width that walks several tiles.
 @pytest.mark.parametrize("num_topk", [1024, 2176, 4224])
 def test_dcp_filter_compaction_matches_reference(
     interleave: int, dcp_rank: int, num_topk: int
 ):
     """In-kernel compaction must, for every row, produce exactly the rank-owned
-    physical slots packed into [0, valid_count) with -1 in the tail -- the same
-    SET a reference filter + sort/gather produces. Uses wide rows (> BLOCK_N
-    valid slots), with interior -1 gaps."""
+    physical slots packed into [0, valid_count) with -1 in the tail, in the
+    order their columns had on input -- the same SEQUENCE a reference filter +
+    gather produces. Uses wide rows (> BLOCK_N valid slots), with interior -1
+    gaps."""
     device = torch.device("cuda")
     torch.manual_seed(7)
     dcp_size = 2
@@ -759,7 +759,7 @@ def test_dcp_filter_compaction_matches_reference(
         assert n == owned.numel()
         assert (out[r, :n] >= 0).all()
         assert (out[r, n:] == -1).all()
-        assert set(out[r, :n].cpu().tolist()) == set(expected.cpu().tolist())
+        assert out[r, :n].cpu().tolist() == expected.cpu().tolist()
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
